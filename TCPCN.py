@@ -198,7 +198,7 @@ def build_graph(skeleton, v_labels, num_vertices, raw_vertices_mask):
     return G
 
 
-def extract_polygons_room_based(skeleton, v_labels, G, refined_centroids, orig_mask, split_4way=True):
+def extract_polygons_room_based(skeleton, v_labels, G, refined_centroids, orig_mask, split_4way=False):
     """Extract polygons from skeleton tiles based on semantic overlap validation."""
     inverted_skeleton = (1 - skeleton).astype(np.uint8)
     num_labels, labels = cv2.connectedComponents(inverted_skeleton, connectivity=4)
@@ -566,7 +566,7 @@ def analyze_junctions_from_polygons(img_rgb, polygons, img_name, vis_dir):
 
 
 def batch_process(img_folder, mask_folder, output_dir, vis_out_folder, save_ply_output=True,
-                  save_json_output=True, fix_convexity=True, split_4way=True, k_size=51):
+                  save_json_output=True, fix_convexity=False, split_4way=False, k_size=51):
     """Process multiple images/masks in a folder sequence."""
     if not save_ply_output and not save_json_output:
         raise ValueError("At least one of PLY or JSON output must be enabled")
@@ -691,10 +691,10 @@ if __name__ == "__main__":
     parser.add_argument("--save_json", type=int, choices=[0, 1], default=1,
                         help="Generate LabelMe JSON files (1=Enable, 0=Disable, default: 1)")
 
-    parser.add_argument("--fix_convexity", type=int, choices=[0, 1], default=1,
-                        help="Enable automatic convex hull fix (1=Enable, 0=Disable, default: 1)")
-    parser.add_argument("--split_4way", type=int, choices=[0, 1], default=1,
-                        help="Enable 4-way junction optimization (1=Enable, 0=Disable, default: 1)")
+    parser.add_argument("--fix_convexity", type=int, choices=[0, 1], default=0,
+                        help="Enable automatic convex hull fix (1=Enable, 0=Disable, default: 0)")
+    parser.add_argument("--split_4way", type=int, choices=[0, 1], default=0,
+                        help="Enable 4-way junction optimization (1=Enable, 0=Disable, default: 0)")
     parser.add_argument("--k_size", type=int, default=51,
                         help="Kernel size for dilation in skeleton preprocessing (default: 51)")
 
