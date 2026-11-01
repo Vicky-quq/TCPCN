@@ -12,10 +12,16 @@ After installing the dependencies in the [main README](../readme.md), install:
 pip install shapely pandas tifffile labelme
 ```
 
-Segmentation metric generation and the two boundary utilities also require `cellpose4`. Verify the imports with:
+Segmentation metrics and boundary utilities also require [Cellpose](https://github.com/MouseLand/cellpose) `4.0.6`:
 
 ```bash
-python -c "from cellpose4 import metrics, utils"
+python -m pip install "cellpose==4.0.6"
+```
+
+Verify the imports:
+
+```bash
+python -c "from cellpose import metrics, utils"
 ```
 
 ## Segmentation Metrics: `save_to_npy.py`

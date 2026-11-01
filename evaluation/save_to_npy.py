@@ -3,7 +3,7 @@ import os
 
 import numpy as np
 import tifffile
-from cellpose4 import metrics
+from cellpose import metrics
 
 from evaluation import tools
 

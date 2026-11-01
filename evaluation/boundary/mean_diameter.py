@@ -2,7 +2,7 @@ import argparse
 import os
 
 import numpy as np
-from cellpose4 import utils
+from cellpose import utils
 
 from evaluation import tools
 
