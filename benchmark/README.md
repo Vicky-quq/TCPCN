@@ -1,104 +1,65 @@
 # Benchmark Data and Results
 
-This directory documents the datasets and generated results used to evaluate TCPCN. Large files are distributed separately so that the source repository remains lightweight.
+This directory describes the datasets and released results used to evaluate TCPCN. For evaluation commands, see the [evaluation guide](../evaluation/README.md).
 
 ## Downloads
 
-- **Evaluation datasets:** hosted on Zenodo at [https://zenodo.org/records/20301518](https://zenodo.org/records/20301518) (DOI: [10.5281/zenodo.20301518](https://doi.org/10.5281/zenodo.20301518)).
-- **Generated results:** available from the [TCPNC GitHub Releases](https://github.com/Vicky-quq/TCPNC/releases) page.
+| Resource | Download | Contents |
+| --- | --- | --- |
+| Dataset | `Porphyra haitanensis.zip` on [Zenodo](https://zenodo.org/records/20301518) (DOI: [10.5281/zenodo.20301518](https://doi.org/10.5281/zenodo.20301518)) | Original microscopy images and LabelMe GT annotations. |
+| Results | `tcpcn_benchmark_results_v1.0.0.zip` from the [v1.0.0 release](https://github.com/Vicky-quq/TCPCN/releases/tag/v1.0.0) | Instance masks, reconstructed polygons/meshes, visualizations, and evaluation files. |
 
-After downloading, extract the dataset archive into `benchmark/Dataset/` and the result archives into `benchmark/`. The reconstructed local layout should match the structure below.
+The [dataset record](https://zenodo.org/records/20301518) describes the two subsets:
 
-## Directory Structure
+| Dataset | Images | Annotated cells |
+| --- | --- | --- |
+| Sansha-5 | 16 | 1,613 |
+| WO115-2 | 16 | 1,746 |
+
+## Extraction and Layout
+
+- Place the extracted `Sansha-5/` and `WO115-2/` dataset directories inside `benchmark/Dataset/`. Each contains original images and GT JSON files.
+- Place the results archive's contents inside `benchmark/Result/`, with `Sansha-5/`, `WO115-2/`, and the evaluation files directly at that level. If extraction creates a `tcpcn_benchmark_results_v1.0.0/` wrapper, place its contents in `benchmark/Result/`.
+
+The resulting layout is:
 
 ```text
 benchmark/
-├── README.md
-├── Dataset/
-│   ├── Sansha-5/
-│   │   ├── *.tif
-│   │   └── *.json
-│   └── WO115-2/
-│       ├── *.tiff
-│       └── *.json
-└── Result/
-    ├── Sansha-5/
-    │   ├── cellposesam/
-    │   ├── cellposesam_ours/
-    │   │   ├── json/
-    │   │   └── ply/
-    │   ├── cyto3/
-    │   └── cyto3_ours/
-    │       ├── json/
-    │       └── ply/
-    ├── WO115-2/
-    │   └── ...
-    ├── *.npy
-    ├── *.csv
-    ├── *.txt
-    └── *.pdf
+|-- README.md
+|-- Dataset/
+|   |-- Sansha-5/                  # Original images and GT JSON
+|   `-- WO115-2/                   # Original images and GT JSON
+`-- Result/
+    |-- Sansha-5/
+    |   |-- cellposesam/           # Instance masks
+    |   |-- cellposesam_ours/
+    |   |   |-- json/              # LabelMe polygons
+    |   |   |-- ply/               # ASCII PLY meshes
+    |   |   `-- vis/               # Pipeline/junction images
+    |   |-- cyto3/                 # Instance masks
+    |   `-- cyto3_ours/             # Same json/ply/vis layout
+    |-- WO115-2/                   # Same four method directories
+    |-- *.npy
+    |-- *.txt
+    |-- *.csv
+    `-- *.pdf
 ```
 
-The JSON files under `Dataset/` are LabelMe ground-truth annotations. The `cellposesam/` and `cyto3/` directories contain instance segmentation masks. Directories ending in `_ours` contain TCPCN post-processing outputs: LabelMe polygons and ASCII PLY meshes.
+Keep dataset and result filenames unchanged so that the evaluation scripts can match predictions to GT.
 
-## Release Assets
+## Released Results
 
-The generated results are split by dataset and segmentation method to simplify downloading:
+`cellposesam` and `cyto3` contain the original segmentation masks. The corresponding `_ours` directories contain their TCPCN reconstructions. For each dataset, each original method has 16 masks; each `_ours` method has 16 JSON files, 16 PLY files, and 32 visualization PNGs (one pipeline image and one junction image per sample).
 
-- `Sansha-5_cellposesam.zip` and `Sansha-5_cyto3.zip` contain the original instance masks for Sansha-5.
-- `Sansha-5_cellposesam_tcpcn_geometry.zip` and `Sansha-5_cyto3_tcpcn_geometry.zip` contain the corresponding TCPCN JSON and PLY outputs for Sansha-5.
-- `WO115-2_cellposesam.zip` and `WO115-2_cyto3.zip` contain the original instance masks for WO115-2.
-- `WO115-2_cellposesam_tcpcn_geometry.zip` and `WO115-2_cyto3_tcpcn_geometry.zip` contain the corresponding TCPCN JSON and PLY outputs for WO115-2.
-- `evaluation_summaries.zip` contains the CSV, TXT, and PDF evaluation summaries under `Result/`.
-- Each `*.npy.zip` archive contains one segmentation-evaluation array and extracts directly under `Result/`.
-- `SHA256SUMS.txt` records checksums for all release archives.
+The following evaluation files are stored directly in `benchmark/Result/`:
 
-Extract every archive into the `benchmark/` directory. Existing directory names and filenames should be preserved because the evaluation commands use them to associate datasets and methods. Full pipeline visualizations are not distributed as Release assets.
+| Files | Count | Description |
+| --- | --- | --- |
+| `<method>_<dataset>.npy` | 8 | Segmentation evaluation arrays for all four methods on both datasets. |
+| `boundary_evaluation_<dataset>.txt` | 2 | Boundary evaluation reports. |
+| `boundary_score_<dataset>.pdf` | 2 | Boundary precision/recall/F-score figures. |
+| `nfcs_<method>_<dataset>.txt` | 4 | NFCS reports for the two `_ours` methods on both datasets. |
+| `vertex_analysis_<dataset>.csv` | 2 | Polygon vertex-count summaries. |
+| `result_segmentation.pdf` | 1 | Combined segmentation summary figure. |
 
-## Reproducing TCPCN Outputs
-
-The following example applies TCPCN to Cellpose-SAM masks from Sansha-5:
-
-```bash
-python TCPCN.py \
-  --img_dir benchmark/Dataset/Sansha-5 \
-  --mask_dir benchmark/Result/Sansha-5/cellposesam \
-  --output_dir benchmark/Result/Sansha-5/cellposesam_ours \
-  --fix_convexity 1 \
-  --split_4way 1 \
-  --k_size 51
-```
-
-## Reproducing Evaluation Outputs
-
-Generate the segmentation arrays for one dataset:
-
-```bash
-python -m evaluation.save_to_npy \
-  --pred_root benchmark/Result/Sansha-5 \
-  --gt_root benchmark/Dataset/Sansha-5 \
-  --output_dir benchmark/Result \
-  --overlap_threshold 0.3
-```
-
-Generate the segmentation summary figure from the downloaded NPY files:
-
-```bash
-python -m evaluation.segmentation.violin \
-  --result_dir benchmark/Result \
-  --output_dir benchmark/Result \
-  --datasets Sansha-5 WO115-2 \
-  --algs cyto3 cyto3_ours cellposesam cellposesam_ours
-```
-
-Run the boundary evaluation:
-
-```bash
-python -m evaluation.boundary.BF1S \
-  --gt_root benchmark/Dataset \
-  --pred_root benchmark/Result \
-  --output_dir benchmark/Result \
-  --algs cyto3 cyto3_ours cellposesam cellposesam_ours
-```
-
-Run commands from the repository root. The datasets and results are not required to use TCPCN on other data; they are provided only for reproducing the reported evaluation.
+The [evaluation guide](../evaluation/README.md) explains how to prepare these files as inputs and recompute the metrics. The [main README](../readme.md) explains how to generate new TCPCN reconstructions.

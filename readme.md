@@ -1,204 +1,116 @@
-# TCPNC
+# TCPCN
 
-TCPNC is a polygon topology reconstruction and evaluation toolkit for cell instance masks. The main pipeline is `TCPCN.py` and exports polygon meshes as PLY and LabelMe JSON files; scripts under `evaluation/` are evaluation utilities for segmentation, boundary, and topology analysis.
+TCPCN is a polygon topology reconstruction and evaluation toolkit for cell instance masks. The main pipeline is `TCPCN.py` and exports polygon meshes as PLY and LabelMe JSON files; scripts under `evaluation/` are evaluation utilities for segmentation, boundary, and topology analysis.
 
-## Directory Layout
+## Installation
 
-```text
-TCPNC/
-├── TCPCN.py                         # Main polygon topology reconstruction pipeline
-└── evaluation/
-    ├── tools.py                     # Shared evaluation helpers
-    ├── save_to_npy.py               # Generate segmentation metric NPY files
-    ├── boundary/
-    │   ├── BF1S.py                  # Boundary precision/recall/F-score evaluation
-    │   └── mean_diameter.py         # Estimate mean/median GT cell diameter
-    ├── segmentation/
-    │   └── violin.py                # Draw segmentation AP/error violin plots
-    └── topology/
-        ├── NFCS.py                  # Neighborhood feature consistency score
-        └── polygon_analysis.py      # Polygon vertex-count distribution analysis
-```
-
-`evaluation/tools.py` is the shared dependency for evaluation scripts. Do not use `eval_utils.py`; it has been removed.
-
-## Environment
-
-Python 3.9+ is recommended. Create an isolated environment first:
+Python 3.9+ is recommended. Create an environment and install the main pipeline dependencies:
 
 ```bash
 conda create -n tcpcn python=3.10
 conda activate tcpcn
+pip install numpy opencv-python matplotlib networkx scikit-image scipy
 ```
 
-Install the common dependencies:
+Additional dependencies for evaluation are listed in the [evaluation guide](evaluation/README.md#dependencies).
 
-```bash
-pip install numpy opencv-python matplotlib networkx scikit-image scipy shapely pandas tifffile labelme
-```
+## Quick Start
 
-The evaluation scripts also import `cellpose4.metrics` and `cellpose4.utils`. The required Cellpose4 package can be downloaded from the [MouseLand/cellpose](https://github.com/MouseLand/cellpose) repository. For example, install it from source with:
-
-```bash
-git clone https://github.com/MouseLand/cellpose.git
-cd cellpose
-pip install -e .
-```
-
-After installation, make sure this check succeeds:
-
-```bash
-python -c "import cellpose4"
-```
-
-You can verify the rest of the environment with:
-
-```bash
-python -c "import cv2, numpy, matplotlib, networkx, skimage, scipy, shapely, pandas, tifffile, labelme"
-```
-
-## Data Organization
-
-Recommended input layout:
+Run all commands from the repository root, where `TCPCN.py` is located. Prepare a directory of instance masks:
 
 ```text
 data/
-├── images/
-├── masks/
-├── gt/
-│   ├── Sansha-5/*.json
-│   └── WO115-2/*.json
-└── predictions/
-    ├── Sansha-5/
-    │   ├── cyto3/*.json
-    │   ├── cyto3_ours/*.json
-    │   ├── cellposesam/*.json
-    │   └── cellposesam_ours/*.json
-    └── WO115-2/
-        └── ...
+└── masks/
+    ├── sample01_masks.tif
+    └── sample02_masks.tif
 ```
 
-Ground-truth JSON files should follow the LabelMe format and include `imageHeight`, `imageWidth`, and polygon-like shapes.
-
-### Image–Mask Pairing Requirements
-
-When `--img_dir` is provided, TCPCN processes every supported image file in that directory and searches for a mask file in `--mask_dir` whose filename contains the image basename. For example, `A2 0808.tif` can be paired with `A2 0808_masks.tif`.
-
-To ensure reliable pairing:
-
-- Store original images and instance masks in **separate directories**. Do not point both `--img_dir` and `--mask_dir` to the same directory; otherwise mask files may also be processed as images.
-- Use a consistent, unique naming convention, such as `sample.tif` and `sample_masks.tif`.
-- Ensure that each image basename matches **exactly one** mask filename. Avoid multiple candidates such as `sample_masks.tif` and `sample_masks_old.tif`, because the current pipeline uses the first matching mask file it finds.
-- Keep the image and its corresponding mask at the same pixel dimensions. Masks should be single-channel instance-label images: background `0`, with each cell assigned a distinct positive integer label.
-
-## Practical Scope and Limitations
-
-TCPCN is designed for the topological post-processing of static two-dimensional (2D) cell instance segmentation masks. It generally provides more stable reconstructions when individual cell contours within a tissue can be reasonably approximated by low-complexity polygons with relatively few sides and exhibit limited local concavity. For cells with highly curved contours, deep local concavities, or highly irregular shapes, automated reconstruction performance may be limited, and users may need to inspect and manually correct the results. For low-quality masks containing substantial noise, incomplete boundaries, or segmentation errors, improving the segmentation or using complementary tools is recommended. In addition, TCPCN does not perform cross-frame cell tracking or temporal-consistency analysis; dynamic datasets therefore require appropriate temporal analysis tools.
-
-## Run TCPCN
-
-Convert instance masks to polygon meshes. PLY and LabelMe JSON outputs are both enabled by default:
+Convert the masks to polygons:
 
 ```bash
-python TCPCN.py \
-  --mask_dir data/masks \
-  --output_dir results \
-  --img_dir data/images \
-  --vis_dir results/vis \
-  --save_ply 1 \
-  --save_json 1 \
-  --fix_convexity 1 \
-  --split_4way 1 \
-  --k_size 51
+python TCPCN.py --mask_dir data/masks --output_dir results
 ```
 
-`--img_dir` and `--vis_dir` are optional. Provide both to save the standard pipeline and junction visualizations; otherwise omit them.
-Generated files are placed in `results/ply/` and `results/json/`. Use `--save_ply 0` or `--save_json 0` to disable either format. The two options cannot both be `0`.
-When standard visualization is enabled, TCPCN saves `<filename>_pipeline.png` and `<filename>_junctions.png` in `--vis_dir`.
+This saves PLY meshes in `results/ply/` and LabelMe JSON files in `results/json/`. Convexity correction and four-way junction splitting are both disabled by default.
 
-PLY files use the standard ASCII PLY vertex-and-face structure:
+To also generate visualizations, place the corresponding original images in `data/images/` and run:
+
+```bash
+python TCPCN.py --mask_dir data/masks --output_dir results --img_dir data/images --vis_dir results/vis
+```
+
+For example, `data/images/sample01.tif` pairs with `data/masks/sample01_masks.tif`.
+
+## Input Requirements
+
+- **Masks:** single-channel 2D images with background `0` and a distinct positive integer label for each cell. Binary masks are separated into instances by connected components; touching cells therefore need distinct labels.
+- **Formats:** `.tif`, `.tiff`, `.png`, and `.jpg` are recognized. Use TIFF or PNG to preserve integer mask labels.
+- **Directories:** place files directly in the input directories; subdirectories are not scanned.
+- **Optional original images:** keep images and masks in separate directories with matching pixel dimensions. Each image basename must occur in exactly one mask filename, such as `sample01.tif` and `sample01_masks.tif`.
+
+Without `--img_dir`, all supported mask files are processed. With `--img_dir`, processing follows the original images and uses the first mask filename containing each image basename; images without a matching mask are skipped.
+
+## Command-Line Arguments
+
+| Argument | Default | Description |
+| --- | --- | --- |
+| `-m`, `--mask_dir` | Required | Input directory of instance masks. |
+| `-o`, `--output_dir` | Required | Output root directory for `ply/` and `json/`. |
+| `-i`, `--img_dir` | Omitted | Original image directory; enables image-based mask pairing. |
+| `-v`, `--vis_dir` | Omitted | Visualization output directory; requires `--img_dir`. |
+| `--save_ply` | `1` | Save PLY meshes. |
+| `--save_json` | `1` | Save LabelMe JSON polygons. |
+| `--fix_convexity` | `0` | Apply convexity correction to reconstructed polygons. |
+| `--split_4way` | `0` | Split four-way junctions into three-way junctions. |
+| `--k_size` | `51` | Morphological kernel size in pixels for skeleton preprocessing (`51` means a 51 x 51 kernel). |
+
+For the four switches, `1` enables the option and `0` disables it. At least one of `--save_ply` and `--save_json` must be enabled.
+
+Convexity correction and four-way junction splitting are both disabled by default. Use `--fix_convexity 1` to enable convexity correction, and `--split_4way 1` to enable four-way junction splitting. Either option can be enabled on its own.
+
+The default `--k_size 51` uses a 51 × 51 pixel kernel and is the setting used for the datasets in this study. For other datasets, adjust the kernel size according to cell size and spacing in pixels, and inspect the resulting skeletons and polygons to assess the reconstruction.
+
+Use `python TCPCN.py --help` to view the command-line help.
+
+## Outputs
+
+For the mask-only quick-start command, the output for `sample01_masks.tif` is:
 
 ```text
-element vertex N
-property float x
-property float y
-property float z
-element face M
-property list uchar int vertex_indices
+results/
+├── json/
+│   └── sample01_masks.json
+└── ply/
+    └── sample01_masks.ply
 ```
 
-PLY coordinates use a Cartesian coordinate system with the origin at the lower left, positive Y upward, and `z = 0`. Faces use counterclockwise vertex order. Shared polygon vertices are stored once and referenced by index from each face. JSON files retain the original image coordinate system with the origin at the upper left and positive Y downward.
+With `--img_dir data/images --vis_dir results/vis`, outputs use the original image basename instead:
 
-### Optional Topology-Refinement Switches
-
-Both topology-refinement steps can be enabled or disabled independently:
-
-- `--fix_convexity 1|0`: apply convexity correction to reconstructed polygons (`1` by default).
-- `--split_4way 1|0`: split four-way junctions into three-way junctions during polygon reconstruction (`1` by default).
-
-Set either option to `0` to disable the corresponding step.
-
-## Segmentation Evaluation
-
-Generate `.npy` metric files for one dataset. `--pred_root` should contain one subfolder per method:
-
-```bash
-python -m evaluation.save_to_npy \
-  --pred_root data/predictions/Sansha-5 \
-  --gt_root data/gt/Sansha-5 \
-  --output_dir results/segmentation \
-  --overlap_threshold 0.3
+```text
+results/
+├── json/
+│   └── sample01.json
+├── ply/
+│   └── sample01.ply
+└── vis/
+    ├── sample01_pipeline.png
+    └── sample01_junctions.png
 ```
 
-Draw AP/error violin plots from generated `.npy` files:
+| Output | Contents |
+| --- | --- |
+| LabelMe JSON | Polygon annotations in image coordinates: origin at the upper left, positive Y downward. |
+| ASCII PLY | Planar vertex-and-face mesh: origin at the lower left, positive Y upward, `z = 0`; faces are counterclockwise and share vertex indices. |
+| Pipeline visualization | Mask, detected junctions, skeleton/graph, and polygons overlaid on the original image. |
+| Junction visualization | Polygon edges with degree-2 junctions in yellow and degree-4 junctions in red. |
 
-```bash
-python -m evaluation.segmentation.violin \
-  --result_dir results/segmentation \
-  --output_dir results/figures \
-  --datasets Sansha-5 WO115-2 \
-  --algs cyto3 cyto3_ours cellposesam cellposesam_ours
-```
+## Evaluation and Benchmark
 
-## Boundary Evaluation
+- [Evaluation guide](evaluation/README.md): dependencies, data preparation, segmentation metrics, boundary scores, and topology analysis.
+- [Benchmark guide](benchmark/README.md): dataset downloads, released results, and commands for reproducing the reported evaluation.
 
-Compute mean and median GT cell diameters:
+Evaluation and ground-truth annotations are optional when processing your own masks.
 
-```bash
-python -m evaluation.boundary.mean_diameter \
-  --gt_root data/gt \
-  --datasets Sansha-5 WO115-2
-```
+## Scope and Limitations
 
-Run boundary precision, recall, and F-score evaluation:
-
-```bash
-python -m evaluation.boundary.BF1S \
-  --gt_root data/gt \
-  --pred_root data/predictions \
-  --output_dir results/boundary \
-  --algs cyto3 cyto3_ours cellposesam cellposesam_ours
-```
-
-## Topology Evaluation
-
-Evaluate NFCS for a single dataset and method:
-
-```bash
-python -m evaluation.topology.NFCS \
-  --gt_dir data/gt/Sansha-5 \
-  --pred_dir data/predictions/Sansha-5/cyto3_ours
-```
-
-Analyze polygon vertex-count distributions and export CSV files:
-
-```bash
-python -m evaluation.topology.polygon_analysis \
-  --pred_root data/predictions \
-  --gt_root data/gt \
-  --datasets Sansha-5 WO115-2 \
-  --algs cellposesam_ours cyto3_ours \
-  --roi_threshold 0.5
-```
-
-Run commands from the `TCPNC/` directory so that the `evaluation` package imports resolve correctly.
+TCPCN is designed for the topological post-processing of static two-dimensional (2D) cell instance segmentation masks. It generally provides more stable reconstructions when individual cell contours within a tissue can be reasonably approximated by low-complexity polygons with relatively few sides and exhibit limited local concavity. For cells with highly curved contours, deep local concavities, or highly irregular shapes, automated reconstruction performance may be limited, and users may need to inspect and manually correct the results. For low-quality masks containing substantial noise, incomplete boundaries, or segmentation errors, improving the segmentation or using complementary tools is recommended. In addition, TCPCN does not perform cross-frame cell tracking or temporal-consistency analysis; dynamic datasets therefore require appropriate temporal analysis tools.
