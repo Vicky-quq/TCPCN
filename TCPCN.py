@@ -373,8 +373,52 @@ def fix_convexity_with_topology(topo):
     return moved_log, orig_reflex_map
 
 
-def save_json(img_name, points_list, h, w, json_dir):
+def classify_boundary_cells(points_list, image_height):
+    """Flag faces incident to an edge owned by only one exported polygon.
+
+    Use the PLY mesh's shared vertex indices and four-decimal precision so
+    classification agrees with the exported geometry. This is a network-boundary
+    flag, not a diagnosis of missing corners or a physical tissue-margin label.
+    """
+    _, faces = build_ply_mesh(points_list, image_height)
+    edge_to_faces = defaultdict(set)
+    for face_idx, face in enumerate(faces):
+        for u, v in zip(face, face[1:] + face[:1]):
+            if u != v:
+                edge_to_faces[tuple(sorted((u, v)))].add(face_idx)
+    flags = [False] * len(faces)
+    for owners in edge_to_faces.values():
+        if len(owners) == 1:
+            flags[next(iter(owners))] = True
+    return flags
+
+
+def _resolve_boundary_flags(points_list, boundary_flags, image_height):
+    if boundary_flags is None:
+        return classify_boundary_cells(points_list, image_height)
+    if len(boundary_flags) != len(points_list):
+        raise ValueError("Boundary flags must match the number of polygons")
+    if any(not isinstance(flag, (bool, np.bool_)) for flag in boundary_flags):
+        raise ValueError("Boundary flags must be boolean values")
+    return [bool(flag) for flag in boundary_flags]
+
+
+def fill_boundary_cells(img_rgb, polygons, boundary_flags):
+    """Add a 25%-opaque red fill before drawing existing outlines and nodes."""
+    flags = _resolve_boundary_flags(polygons, boundary_flags, img_rgb.shape[0])
+    fill_mask = np.zeros(img_rgb.shape[:2], dtype=np.uint8)
+    for points, is_boundary in zip(polygons, flags):
+        if is_boundary:
+            pts = np.asarray(points, np.int32).reshape((-1, 1, 2))
+            cv2.fillPoly(fill_mask, [pts], 1)
+    overlay = img_rgb.copy()
+    overlay[fill_mask > 0] = (255, 0, 0)
+    return cv2.addWeighted(img_rgb, 0.75, overlay, 0.25, 0)
+
+
+def save_json(img_name, points_list, h, w, json_dir, boundary_flags=None):
     """Save extracted polygons to a Labelme-compatible JSON file."""
+    boundary_flags = _resolve_boundary_flags(points_list, boundary_flags, h)
     labelme_shapes = []
     for idx, points in enumerate(points_list):
         labelme_shapes.append({
@@ -383,7 +427,7 @@ def save_json(img_name, points_list, h, w, json_dir):
             "group_id": None,
             "description": "",
             "shape_type": "polygon",
-            "flags": {},
+            "flags": {"boundary_cell": boundary_flags[idx]},
             "mask": None
         })
     data = {
@@ -446,9 +490,10 @@ def build_ply_mesh(points_list, image_height):
     return vertices, faces
 
 
-def save_ply(img_name, points_list, image_height, ply_dir):
+def save_ply(img_name, points_list, image_height, ply_dir, boundary_flags=None):
     """Save polygons as a standard ASCII PLY vertex-and-face mesh."""
     vertices, faces = build_ply_mesh(points_list, image_height)
+    boundary_flags = _resolve_boundary_flags(points_list, boundary_flags, image_height)
     ply_path = os.path.join(ply_dir, os.path.splitext(img_name)[0] + ".ply")
 
     with open(ply_path, 'w', encoding='ascii', newline='\n') as f:
@@ -460,16 +505,18 @@ def save_ply(img_name, points_list, image_height, ply_dir):
         f.write("property float z\n")
         f.write(f"element face {len(faces)}\n")
         f.write("property list uchar int vertex_indices\n")
+        f.write("property uchar boundary_cell\n")
         f.write("end_header\n")
 
         for x, y, z in vertices:
             f.write(f"{x:.10g} {y:.10g} {z:.10g}\n")
-        for face in faces:
+        for face, is_boundary in zip(faces, boundary_flags):
             indices = " ".join(str(index) for index in face)
-            f.write(f"{len(face)} {indices}\n")
+            f.write(f"{len(face)} {indices} {int(is_boundary)}\n")
 
 
-def render_visualization(img_rgb, mask, skeleton, G, refined_centroids, final_polygons, img_name, vis_dir):
+def render_visualization(img_rgb, mask, skeleton, G, refined_centroids, final_polygons, img_name, vis_dir,
+                         boundary_flags=None):
     """Render and save pipeline processing status as an image."""
     plt.figure(figsize=(20, 16))
 
@@ -503,7 +550,7 @@ def render_visualization(img_rgb, mask, skeleton, G, refined_centroids, final_po
     plt.axis('off')
 
     plt.subplot(2, 2, 4)
-    vis_poly = img_rgb.copy()
+    vis_poly = fill_boundary_cells(img_rgb, final_polygons, boundary_flags)
     cmap = plt.get_cmap('tab20')
     for idx, points in enumerate(final_polygons):
         pts = np.array(points, np.int32).reshape((-1, 1, 2))
@@ -518,7 +565,7 @@ def render_visualization(img_rgb, mask, skeleton, G, refined_centroids, final_po
     plt.close()
 
 
-def analyze_junctions_from_polygons(img_rgb, polygons, img_name, vis_dir):
+def analyze_junctions_from_polygons(img_rgb, polygons, img_name, vis_dir, boundary_flags=None):
     """Detect and visualize junction types (degree 2 and 4) from reconstructed polygons."""
     from collections import defaultdict
     point_to_edges = defaultdict(set)
@@ -541,7 +588,7 @@ def analyze_junctions_from_polygons(img_rgb, polygons, img_name, vis_dir):
             deg4_points.append(pt_coords)
         all_unique_edges.update(edges)
 
-    vis_img = img_rgb.copy()
+    vis_img = fill_boundary_cells(img_rgb, polygons, boundary_flags)
     for edge in all_unique_edges:
         pts = list(edge)
         if len(pts) == 2:
@@ -655,19 +702,22 @@ def batch_process(img_folder, mask_folder, output_dir, vis_out_folder, save_ply_
                     fixed_polygons.append(topo_manager.get_shape_points(s_idx).tolist())
                 polygons = fixed_polygons
 
+            boundary_flags = classify_boundary_cells(polygons, h)
+
             if ply_out_folder:
                 print(f"   [Save] Saving PLY to {ply_out_folder}...")
-                save_ply(file_identifier, polygons, h, ply_out_folder)
+                save_ply(file_identifier, polygons, h, ply_out_folder, boundary_flags)
             if json_out_folder:
                 print(f"   [Save] Saving JSON to {json_out_folder}...")
-                save_json(file_identifier, polygons, h, w, json_out_folder)
+                save_json(file_identifier, polygons, h, w, json_out_folder, boundary_flags)
 
             if vis_out_folder and img_rgb is not None:
                 print(f"   [Render] Rendering pipeline visualization...")
-                render_visualization(img_rgb, mask, skeleton, G, v_cents, polygons, file_identifier, vis_out_folder)
+                render_visualization(img_rgb, mask, skeleton, G, v_cents, polygons, file_identifier, vis_out_folder,
+                                     boundary_flags)
 
                 print(f"   [Render] Analyzing junctions...\n")
-                analyze_junctions_from_polygons(img_rgb, polygons, file_identifier, vis_out_folder)
+                analyze_junctions_from_polygons(img_rgb, polygons, file_identifier, vis_out_folder, boundary_flags)
             else:
                 print()
 

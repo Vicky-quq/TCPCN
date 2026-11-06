@@ -104,6 +104,11 @@ results/
 | Pipeline visualization | Mask, detected junctions, skeleton/graph, and polygons overlaid on the original image. |
 | Junction visualization | Polygon edges with degree-2 junctions in yellow and degree-4 junctions in red. |
 
+Cells on the reconstructed network boundary are retained and marked using
+`flags.boundary_cell` (`true`/`false`) in JSON and the per-face `boundary_cell`
+attribute (`1`/`0`) in PLY, where `true` or `1` indicates a boundary cell.
+These cells are highlighted with a translucent red fill in the result visualizations.
+
 ## Evaluation and Benchmark
 
 - [Evaluation guide](evaluation/README.md): dependencies, data preparation, segmentation metrics, boundary scores, and topology analysis.
@@ -114,3 +119,5 @@ Evaluation and ground-truth annotations are optional when processing your own ma
 ## Scope and Limitations
 
 TCPCN is designed for the topological post-processing of static two-dimensional (2D) cell instance segmentation masks. It generally provides more stable reconstructions when individual cell contours within a tissue can be reasonably approximated by low-complexity polygons with relatively few sides and exhibit limited local concavity. For cells with highly curved contours, deep local concavities, or highly irregular shapes, automated reconstruction performance may be limited, and users may need to inspect and manually correct the results. For low-quality masks containing substantial noise, incomplete boundaries, or segmentation errors, improving the segmentation or using complementary tools is recommended. In addition, TCPCN does not perform cross-frame cell tracking or temporal-consistency analysis; dynamic datasets therefore require appropriate temporal analysis tools.
+
+At tissue margins, non-junction corners may be omitted during polygonization, causing some boundary-cell polygons to deviate substantially from the input instance contours. Boundary cells are retained and flagged in the JSON and PLY outputs to support inspection before analyses requiring accurate contour geometry.
