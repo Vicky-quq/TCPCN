@@ -232,8 +232,9 @@ def build_graph(skeleton, v_labels, num_vertices, raw_vertices_mask):
     return G
 
 
-def extract_polygons_room_based(skeleton, v_labels, G, refined_centroids, orig_mask, split_4way=False):
-    """Extract polygons from skeleton tiles based on semantic overlap validation."""
+def extract_polygons_room_based(skeleton, v_labels, G, refined_centroids, orig_mask, split_4way=False,
+                                *, return_instance_ids=False):
+    """Extract polygons, optionally returning the matched mask IDs in face order."""
     inverted_skeleton = (1 - skeleton).astype(np.uint8)
     num_labels, labels = cv2.connectedComponents(inverted_skeleton, connectivity=4)
     v_map_expanded = ndi.maximum_filter(v_labels, size=(3, 3))
@@ -243,6 +244,7 @@ def extract_polygons_room_based(skeleton, v_labels, G, refined_centroids, orig_m
 
     final_polygons_points = []
     polygon_node_ids = []
+    matched_instance_ids = []
     edge_counts: Counter[tuple[int, int]] = Counter()
     temp_cycles = []
 
@@ -273,7 +275,7 @@ def extract_polygons_room_based(skeleton, v_labels, G, refined_centroids, orig_m
         res_cycles = nx.cycle_basis(sub)
         if res_cycles:
             current_cycle = res_cycles[0]
-            temp_cycles.append(current_cycle)
+            temp_cycles.append((current_cycle, target_instance_id))
             for j in range(len(current_cycle)):
                 u, v = sorted((current_cycle[j], current_cycle[(j + 1) % len(current_cycle)]))
                 edge_counts[(u, v)] += 1
@@ -283,12 +285,13 @@ def extract_polygons_room_based(skeleton, v_labels, G, refined_centroids, orig_m
     anchor_nodes = {n for n in G.nodes() if G.degree(n) > 2 or n in outer_nodes}
     G_simplified.add_nodes_from(anchor_nodes)
 
-    for cycle in temp_cycles:
+    for cycle, instance_id in temp_cycles:
         cycle_anchors = [v for v in cycle if v in anchor_nodes]
         pts = [refined_centroids[v].tolist() for v in cycle_anchors]
         if len(pts) >= 3:
             final_polygons_points.append(pts)
             polygon_node_ids.append(tuple(cycle_anchors))
+            matched_instance_ids.append(instance_id)
 
             for j in range(len(cycle_anchors)):
                 u_anchor = cycle_anchors[j]
@@ -299,6 +302,8 @@ def extract_polygons_room_based(skeleton, v_labels, G, refined_centroids, orig_m
     if split_4way:
         final_polygons_points = optimize_four_way_junctions(
             G, final_polygons_points, refined_centroids, polygon_node_ids=polygon_node_ids)
+    if return_instance_ids:
+        return final_polygons_points, matched_instance_ids
     return final_polygons_points
 
 
@@ -453,13 +458,37 @@ def fill_boundary_cells(img_rgb, polygons, boundary_flags):
     return cv2.addWeighted(img_rgb, 0.75, overlay, 0.25, 0)
 
 
-def save_json(img_name, points_list, h, w, json_dir, boundary_flags=None):
+def _resolve_source_instance_ids(face_count, source_instance_ids):
+    if source_instance_ids is None:
+        return [None] * face_count
+    if len(source_instance_ids) != face_count:
+        raise ValueError("Source ID entries must match the number of faces (use None for unknown IDs)")
+
+    resolved = []
+    seen = set()
+    for source_id in source_instance_ids:
+        if source_id is None:
+            resolved.append(None)
+            continue
+        instance_id = int(source_id)
+        if instance_id != source_id or instance_id <= 0:
+            raise ValueError("Source instance IDs must be positive integers or None")
+        if instance_id in seen:
+            raise ValueError(f"Duplicate source instance ID: {instance_id}")
+        seen.add(instance_id)
+        resolved.append(instance_id)
+    return resolved
+
+
+def save_json(img_name, points_list, h, w, json_dir, boundary_flags=None, *, source_instance_ids=None):
     """Save extracted polygons to a Labelme-compatible JSON file."""
     boundary_flags = _resolve_boundary_flags(points_list, boundary_flags, h)
+    source_instance_ids = _resolve_source_instance_ids(len(points_list), source_instance_ids)
     labelme_shapes = []
     for idx, points in enumerate(points_list):
         labelme_shapes.append({
             "label": str(idx + 1),
+            "source_instance_id": source_instance_ids[idx],
             "points": points,
             "group_id": None,
             "description": "",
@@ -527,10 +556,13 @@ def build_ply_mesh(points_list, image_height):
     return vertices, faces
 
 
-def save_ply(img_name, points_list, image_height, ply_dir, boundary_flags=None):
+def save_ply(img_name, points_list, image_height, ply_dir, boundary_flags=None, *, source_instance_ids=None):
     """Save polygons as a standard ASCII PLY vertex-and-face mesh."""
     vertices, faces = build_ply_mesh(points_list, image_height)
     boundary_flags = _resolve_boundary_flags(points_list, boundary_flags, image_height)
+    source_instance_ids = _resolve_source_instance_ids(len(faces), source_instance_ids)
+    if any(source_id is not None and source_id > 2147483647 for source_id in source_instance_ids):
+        raise ValueError("Source instance ID exceeds the signed 32-bit PLY property range")
     ply_path = os.path.join(ply_dir, os.path.splitext(img_name)[0] + ".ply")
 
     with open(ply_path, 'w', encoding='ascii', newline='\n') as f:
@@ -543,13 +575,39 @@ def save_ply(img_name, points_list, image_height, ply_dir, boundary_flags=None):
         f.write(f"element face {len(faces)}\n")
         f.write("property list uchar int vertex_indices\n")
         f.write("property uchar boundary_cell\n")
+        f.write("property int source_instance_id\n")
         f.write("end_header\n")
 
         for x, y, z in vertices:
             f.write(f"{x:.10g} {y:.10g} {z:.10g}\n")
-        for face, is_boundary in zip(faces, boundary_flags):
+        for face, is_boundary, source_id in zip(faces, boundary_flags, source_instance_ids):
             indices = " ".join(str(index) for index in face)
-            f.write(f"{len(face)} {indices} {int(is_boundary)}\n")
+            f.write(f"{len(face)} {indices} {int(is_boundary)} {0 if source_id is None else source_id}\n")
+
+
+def save_source_report(img_name, mask_name, report_dir, source_instance_ids, input_instance_ids):
+    """Record original-label coverage. A None input ID set means internal relabeling."""
+    matched_ids = {source_id for source_id in source_instance_ids if source_id is not None}
+    unmatched_face_indices = [index for index, source_id in enumerate(source_instance_ids)
+                              if source_id is None]
+    if input_instance_ids is None:
+        status = "relabeled_internally"
+        input_count = "N/A"
+        unrepresented_ids = "N/A"
+    else:
+        status = "original" if matched_ids else "unavailable"
+        input_count = len(input_instance_ids)
+        unrepresented_ids = sorted(input_instance_ids - matched_ids)
+
+    report_path = os.path.join(report_dir, os.path.splitext(img_name)[0] + "_source_report.txt")
+    with open(report_path, 'w', encoding='utf-8', newline='\n') as f:
+        f.write(f"source_mask: {mask_name}\n")
+        f.write(f"source_id_status: {status}\n")
+        f.write(f"input_instance_count: {input_count}\n")
+        f.write(f"output_face_count: {len(source_instance_ids)}\n")
+        f.write(f"matched_face_count: {len(source_instance_ids) - len(unmatched_face_indices)}\n")
+        f.write(f"unrepresented_input_instance_ids: {unrepresented_ids}\n")
+        f.write(f"unmatched_output_face_indices: {unmatched_face_indices}\n")
 
 
 def render_visualization(img_rgb, mask, skeleton, G, refined_centroids, final_polygons, img_name, vis_dir,
@@ -658,6 +716,8 @@ def batch_process(img_folder, mask_folder, output_dir, vis_out_folder, save_ply_
     os.makedirs(output_dir, exist_ok=True)
     ply_out_folder = os.path.join(output_dir, "ply") if save_ply_output else None
     json_out_folder = os.path.join(output_dir, "json") if save_json_output else None
+    report_out_folder = os.path.join(output_dir, "reports")
+    os.makedirs(report_out_folder, exist_ok=True)
     if ply_out_folder:
         os.makedirs(ply_out_folder, exist_ok=True)
     if json_out_folder:
@@ -718,15 +778,19 @@ def batch_process(img_folder, mask_folder, output_dir, vis_out_folder, save_ply_
                 img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
                 h, w = img.shape[:2]
 
-            if len(np.unique(mask)) <= 2:
+            mask_values = np.unique(mask)
+            if len(mask_values) <= 2:
                 _, instance_mask = cv2.connectedComponents((mask > 0).astype(np.uint8))
+                input_instance_ids = None
             else:
                 instance_mask = mask
+                input_instance_ids = set(mask_values[mask_values > 0].tolist())
 
             skeleton, v_labels, v_cents, v_mask = preprocess_skeleton(mask, k_size=k_size)
             G = build_graph(skeleton, v_labels, len(v_cents), v_mask)
-            polygons = extract_polygons_room_based(skeleton, v_labels, G, v_cents, orig_mask=instance_mask,
-                                                   split_4way=split_4way)
+            polygons, matched_instance_ids = extract_polygons_room_based(
+                skeleton, v_labels, G, v_cents, orig_mask=instance_mask, split_4way=split_4way,
+                return_instance_ids=True)
 
             if fix_convexity and len(polygons) > 0:
                 print(f"   [Convexity Fix] Applying convex hull fix to {len(polygons)} polygons...")
@@ -740,13 +804,23 @@ def batch_process(img_folder, mask_folder, output_dir, vis_out_folder, save_ply_
                 polygons = fixed_polygons
 
             boundary_flags = classify_boundary_cells(polygons, h)
+            source_instance_ids = _resolve_source_instance_ids(
+                len(polygons), matched_instance_ids if input_instance_ids is not None else None)
+            if input_instance_ids is not None:
+                unknown_ids = set(source_instance_ids).difference(input_instance_ids, {None})
+                if unknown_ids:
+                    raise ValueError(f"Source instance IDs absent from input mask: {sorted(unknown_ids)}")
 
             if ply_out_folder:
                 print(f"   [Save] Saving PLY to {ply_out_folder}...")
-                save_ply(file_identifier, polygons, h, ply_out_folder, boundary_flags)
+                save_ply(file_identifier, polygons, h, ply_out_folder, boundary_flags,
+                         source_instance_ids=source_instance_ids)
             if json_out_folder:
                 print(f"   [Save] Saving JSON to {json_out_folder}...")
-                save_json(file_identifier, polygons, h, w, json_out_folder, boundary_flags)
+                save_json(file_identifier, polygons, h, w, json_out_folder, boundary_flags,
+                          source_instance_ids=source_instance_ids)
+            save_source_report(file_identifier, os.path.basename(mask_path), report_out_folder,
+                               source_instance_ids, input_instance_ids)
 
             if vis_out_folder and img_rgb is not None:
                 print(f"   [Render] Rendering pipeline visualization...")
@@ -770,7 +844,7 @@ if __name__ == "__main__":
                         help="(Optional) Input directory of original images, required for visualization")
     parser.add_argument("-m", "--mask_dir", type=str, required=True, help="Input directory of instance masks")
     parser.add_argument("-o", "--output_dir", type=str, required=True,
-                        help="Output root directory; PLY and JSON files are saved in separate subdirectories")
+                        help="Output root directory for PLY, JSON, and source reports")
     parser.add_argument("-v", "--vis_dir", type=str, default=None,
                         help="(Optional) Output directory for visualization images")
     parser.add_argument("--save_ply", type=int, choices=[0, 1], default=1,
