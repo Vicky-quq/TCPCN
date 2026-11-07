@@ -23,58 +23,101 @@ def get_node_color(deg):
     return 128, 128, 128
 
 
-def optimize_four_way_junctions(G, final_polygons_points, refined_centroids, split_ratio=0.1):
-    """Split 4-way junctions based on topology edge association and sector matching."""
+def optimize_four_way_junctions(G, final_polygons_points, refined_centroids, split_ratio=0.1,
+                               polygon_node_ids=None):
+    """Split junctions by replacing vertices in their original cycle positions.
 
-    def to_t(pt):
-        return (round(float(pt[0]), 2), round(float(pt[1]), 2))
-
-    edge_to_polys = {}
-    for p_idx, poly in enumerate(final_polygons_points):
-        n = len(poly)
-        for i in range(n):
-            p1_t = to_t(poly[i])
-            p2_t = to_t(poly[(i + 1) % n])
-            edge = tuple(sorted([p1_t, p2_t]))
-            if edge not in edge_to_polys:
-                edge_to_polys[edge] = []
-            edge_to_polys[edge].append(p_idx)
-
+    Original node IDs and edge ownership remain fixed throughout splitting.
+    Coordinates and polygon statistics may change, but surviving vertices are
+    never reordered. ``polygon_node_ids`` follows the same order as each input
+    polygon; coordinate lookup supports callers using the original signature.
+    """
     modified_polygons = [[list(pt) for pt in poly] for poly in final_polygons_points]
     four_way_nodes = [n for n, d in G.degree() if d == 4]
+    if not four_way_nodes:
+        return modified_polygons
 
-    optimization_debug_lines = []
+    if polygon_node_ids is None:
+        coordinate_to_nodes = defaultdict(list)
+        for node in G.nodes():
+            coordinate_to_nodes[tuple(map(float, refined_centroids[node]))].append(node)
+        original_rings = []
+        for poly in final_polygons_points:
+            ring = []
+            for point in poly:
+                matches = coordinate_to_nodes.get(tuple(map(float, point)), [])
+                if len(matches) != 1:
+                    raise ValueError("Polygon vertices must identify unique graph nodes; "
+                                     "provide polygon_node_ids explicitly")
+                ring.append(matches[0])
+            original_rings.append(tuple(ring))
+    else:
+        original_rings = [tuple(ring) for ring in polygon_node_ids]
+
+    if (len(original_rings) != len(final_polygons_points) or
+            any(len(ring) != len(poly)
+                for ring, poly in zip(original_rings, final_polygons_points))):
+        raise ValueError("Polygon node IDs must match the input vertex sequences")
+
+    edge_to_polys = defaultdict(set)
+    node_to_polys = defaultdict(set)
+    for p_idx, ring in enumerate(original_rings):
+        for i, node in enumerate(ring):
+            node_to_polys[node].add(p_idx)
+            edge_to_polys[frozenset((node, ring[(i + 1) % len(ring)]))].add(p_idx)
+
+    point_coordinates = {node: list(refined_centroids[node]) for node in G.nodes()}
+    replacements = [{} for _ in original_rings]
+
+    def rebuild_polygon(p_idx):
+        # Expand each original vertex into its own contiguous replacement block.
+        # This also handles two adjacent junctions being split in succession.
+        return [list(point_coordinates[new_node])
+                for node in original_rings[p_idx]
+                for new_node in replacements[p_idx].get(node, (node,))]
 
     for node_idx in four_way_nodes:
         v_coords = np.array(refined_centroids[node_idx])
-        v_t = to_t(v_coords)
 
         neighbors_idx = list(G.neighbors(node_idx))
         neighbors_idx.sort(key=lambda ni: np.arctan2(refined_centroids[ni][1] - v_coords[1],
                                                      refined_centroids[ni][0] - v_coords[0]))
 
-        is_outer_boundary = False
         edge_polys_sets = []
         for n_idx in neighbors_idx:
-            n_t = to_t(refined_centroids[n_idx])
-            edge = tuple(sorted([v_t, n_t]))
-            polys = edge_to_polys.get(edge, [])
-            if len(polys) < 2:
-                is_outer_boundary = True
+            polys = edge_to_polys.get(frozenset((node_idx, n_idx)), set())
+            # Boundary and non-manifold branches have no unambiguous split.
+            if len(polys) != 2:
                 break
-            edge_polys_sets.append(set(polys))
+            edge_polys_sets.append(polys)
 
-        if is_outer_boundary:
+        if len(edge_polys_sets) != 4:
             continue
 
         cell_indices = []
         for i in range(4):
             common = edge_polys_sets[i].intersection(edge_polys_sets[(i + 1) % 4])
-            if not common:
+            if len(common) != 1:
                 break
-            cell_indices.append(list(common)[0])
+            cell_indices.append(next(iter(common)))
 
-        if len(cell_indices) < 4:
+        if len(cell_indices) != 4 or len(set(cell_indices)) != 4:
+            continue
+        if node_to_polys[node_idx] != set(cell_indices):
+            continue
+
+        original_neighbors = {}
+        for p_idx in cell_indices:
+            ring = original_rings[p_idx]
+            if ring.count(node_idx) != 1:
+                break
+            pos = ring.index(node_idx)
+            prev_node = ring[(pos - 1) % len(ring)]
+            next_node = ring[(pos + 1) % len(ring)]
+            if prev_node == next_node or prev_node not in neighbors_idx or next_node not in neighbors_idx:
+                break
+            original_neighbors[p_idx] = (prev_node, next_node)
+        if len(original_neighbors) != 4:
             continue
 
         sum02 = len(modified_polygons[cell_indices[0]]) + len(modified_polygons[cell_indices[2]])
@@ -102,53 +145,44 @@ def optimize_four_way_junctions(G, final_polygons_points, refined_centroids, spl
 
         if use_13:
             p_to_separate = [cell_indices[1], cell_indices[3]]
-            p_to_add_edge = [cell_indices[0], cell_indices[2]]
             dir1 = poly_centers[1] - v_coords
             dir2 = poly_centers[3] - v_coords
-            optimization_debug_lines.append((poly_centers[1].tolist(), poly_centers[3].tolist()))
         else:
             p_to_separate = [cell_indices[0], cell_indices[2]]
-            p_to_add_edge = [cell_indices[1], cell_indices[3]]
             dir1 = poly_centers[0] - v_coords
             dir2 = poly_centers[2] - v_coords
-            optimization_debug_lines.append((poly_centers[0].tolist(), poly_centers[2].tolist()))
+
+        # Every original branch borders exactly one of these two cells. Its
+        # endpoint must be that cell's new vertex, on both sides of the edge.
+        cell_to_endpoint = {p_idx: i for i, p_idx in enumerate(p_to_separate)}
+        neighbor_to_endpoint = {}
+        for n_idx, owners in zip(neighbors_idx, edge_polys_sets):
+            selected_owners = owners.intersection(cell_to_endpoint)
+            if len(selected_owners) != 1:
+                break
+            neighbor_to_endpoint[n_idx] = cell_to_endpoint[next(iter(selected_owners))]
+        if len(neighbor_to_endpoint) != 4:
+            continue
 
         avg_branch_len = np.mean([np.linalg.norm(refined_centroids[ni] - v_coords) for ni in neighbors_idx])
         mag = avg_branch_len * split_ratio
 
         v1_new = (v_coords + (dir1 / (np.linalg.norm(dir1) + 1e-6)) * mag).tolist()
         v2_new = (v_coords + (dir2 / (np.linalg.norm(dir2) + 1e-6)) * mag).tolist()
+        if v1_new == v2_new:
+            continue
 
-        for i, p_idx in enumerate(p_to_separate):
-            target_v = v1_new if i == 0 else v2_new
-            modified_polygons[p_idx] = [target_v if to_t(pt) == v_t else pt for pt in modified_polygons[p_idx]]
+        new_ids = (('split', node_idx, 0), ('split', node_idx, 1))
+        point_coordinates[new_ids[0]] = v1_new
+        point_coordinates[new_ids[1]] = v2_new
+        for p_idx, (prev_node, next_node) in original_neighbors.items():
+            first = new_ids[neighbor_to_endpoint[prev_node]]
+            last = new_ids[neighbor_to_endpoint[next_node]]
+            replacements[p_idx][node_idx] = (first,) if first == last else (first, last)
+        for p_idx in cell_indices:
+            modified_polygons[p_idx] = rebuild_polygon(p_idx)
 
-        for p_idx in p_to_add_edge:
-            new_poly = []
-            poly = modified_polygons[p_idx]
-            for pt_idx, pt in enumerate(poly):
-                if to_t(pt) == v_t:
-                    prev_pt = np.array(poly[pt_idx - 1])
-                    if np.linalg.norm(np.array(v1_new) - prev_pt) < np.linalg.norm(np.array(v2_new) - prev_pt):
-                        new_poly.extend([v1_new, v2_new])
-                    else:
-                        new_poly.extend([v2_new, v1_new])
-                else:
-                    new_poly.append(pt)
-            modified_polygons[p_idx] = new_poly
-
-    final_output = []
-    for poly in modified_polygons:
-        pts = np.array([[float(pt[0]), float(pt[1])] for pt in poly])
-        if len(pts) >= 3:
-            centroid = np.mean(pts, axis=0)
-            angles = np.arctan2(pts[:, 1] - centroid[1], pts[:, 0] - centroid[0])
-            sorted_idx = np.argsort(angles)
-            final_output.append(pts[sorted_idx].tolist())
-        else:
-            final_output.append(pts.tolist())
-
-    return final_output
+    return modified_polygons
 
 
 def preprocess_skeleton(mask, k_size=51):
@@ -208,6 +242,7 @@ def extract_polygons_room_based(skeleton, v_labels, G, refined_centroids, orig_m
     instance_areas = dict(zip(unique_ids, counts))
 
     final_polygons_points = []
+    polygon_node_ids = []
     edge_counts: Counter[tuple[int, int]] = Counter()
     temp_cycles = []
 
@@ -249,11 +284,12 @@ def extract_polygons_room_based(skeleton, v_labels, G, refined_centroids, orig_m
     G_simplified.add_nodes_from(anchor_nodes)
 
     for cycle in temp_cycles:
-        pts = [refined_centroids[v].tolist() for v in cycle if v in anchor_nodes]
+        cycle_anchors = [v for v in cycle if v in anchor_nodes]
+        pts = [refined_centroids[v].tolist() for v in cycle_anchors]
         if len(pts) >= 3:
             final_polygons_points.append(pts)
+            polygon_node_ids.append(tuple(cycle_anchors))
 
-            cycle_anchors = [v for v in cycle if v in anchor_nodes]
             for j in range(len(cycle_anchors)):
                 u_anchor = cycle_anchors[j]
                 v_anchor = cycle_anchors[(j + 1) % len(cycle_anchors)]
@@ -261,7 +297,8 @@ def extract_polygons_room_based(skeleton, v_labels, G, refined_centroids, orig_m
 
     G = G_simplified
     if split_4way:
-        final_polygons_points = optimize_four_way_junctions(G, final_polygons_points, refined_centroids)
+        final_polygons_points = optimize_four_way_junctions(
+            G, final_polygons_points, refined_centroids, polygon_node_ids=polygon_node_ids)
     return final_polygons_points
 
 
